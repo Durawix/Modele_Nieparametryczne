@@ -1,0 +1,701 @@
+
+---
+title: "Modele Nieparametryczne"
+author: "Jakub Durawa & Patryk Fierek"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    toc: true
+    toc-location: left
+knitr:
+  opts_chunk:
+    tidy: true
+    tidy.opts: 
+      width.cutoff: 60
+    message: false
+    warning: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# 1. Instalowanie potrzebnych bibliotek
+
+```{r, echo=FALSE, message= FALSE, warning= FALSE}
+# Ustawienie repozytorium CRAN (np. dla Polski)
+options(repos = c(CRAN = "https://cran.rstudio.com"))
+
+# Instalowanie pakietów
+install.packages("caret")
+install.packages("randomForest")
+install.packages("lubridate")
+install.packages("MLmetrics")
+install.packages("ggplot2")
+install.packages("dplyr")
+
+# Ładowanie pakietów
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(randomForest)
+library(lubridate)
+library(MLmetrics)
+
+# Sprawdzenie załadowanych bibliotek
+loaded_libraries <- search()
+print(loaded_libraries)
+
+```
+# 2. Wczytanie danych i ich eksploracja
+```{r}
+# Wczytanie danych
+load("C:/Users/PC/Desktop/Modele niepa/dane_zaliczenie.Rdata")
+
+# Wylistowanie obiektów w środowisku
+ls()
+
+# Podgląd danych
+str(proba_uczaca)
+summary(proba_uczaca)
+
+# Sprawdzenie braków danych
+sapply(proba_uczaca, function(x) sum(is.na(x)))
+
+#Tworzymy tzw. pliki surowe, żeby w razie co być w stanie porównać wykonane transformacje
+proba_uczaca_raw <- proba_uczaca
+
+proba_testowa_raw <- proba_testowa
+
+```
+Mamy 29,412 obserwacji (wierszy) dla 20 zmiennych (kolumn),
+Różne typy zmiennych (Liczby,daty,tekst)
+
+Wnioski z wstępnej analizy zmiennych dla zmiennej:
+
+amount:
+Średnia dla amount wynosi 59,66, a mediana 30.
+Minimalna wartość wynosi 0,51, a maksymalna wartość wynosi 3450,58.
+Rozkład sugeruje, że większośc transkacji to małe kwoty, z występującymi wartościami odstającymi.
+
+createtime: 
+Zgodnie z poleceniem - dane transkacji inicjalizujących pochodzą z zakresu od stycznia 2020 do lipca 2021.
+
+expiryyear:
+Rok ważności kart się od 2020 do 2029
+
+status:
+Najczęściej występujący status to completed successfully (20387 transkacji) - jest to ważna wartość dla nas w analizie.
+Card limit esceeded występuje 4618 razy, a do not honor 404 razy.
+Braki danych w tej kolumnie pokrywają się z innymi brakującymi kolumnami.
+
+
+### 2.1 Czyszczenie danych
+
+#### 2.1.1 Porownanie zawartosci kolumn raw
+```{r}
+# Pobierz nazwy kolumn
+kolumny_uczace_raw <- colnames(proba_uczaca_raw)
+kolumny_testowe_raw <- colnames(proba_testowa_raw)
+
+# Kolumny, które są w proba_uczaca, ale nie ma ich w proba_testowa
+roznica_uczaca_raw <- setdiff(kolumny_uczace_raw, kolumny_testowe_raw)
+
+# Kolumny, które są w proba_testowa, ale nie ma ich w proba_uczaca
+roznica_testowa_raw <- setdiff(kolumny_testowe_raw, kolumny_uczace_raw)
+
+# Wyświetl różnice dla próby uczącej
+cat("Kolumny tylko w próbie uczącej_raw:\n")
+print(roznica_uczaca_raw)
+
+#Wyświetl różnice dla próby testowej 
+cat("Kolumny tylko w próbie testowej_raw:\n")
+print(roznica_testowa_raw)
+```
+
+Kolumna status znajduje się w próbie uczącej, ale nie znajduje się w próbie testowej, ponieważ służy ona do uczenai modelu w zbiorze uczącym, zbiór testowym służy wyłącznie do predykcji, a nie do oceny modelu.
+Poza kolumną status, oba zbiory mają identyczną strukturę, jest to korzystna dla nas sytuacja.
+
+#### 2.1.2 Sprawdzanie NA w kolumnach w probie uczacej
+```{r}
+#Zliczamy brakujące wartości (NA) w każdej kolumnie z proba_uczaca i wyswietlamy wyniki
+na_per_column <- colSums(is.na(proba_uczaca))
+cat("Liczba brakujących wartości w każdej kolumnie:\n")
+print(na_per_column)
+
+```
+#### 2.1.3 Usuwanie braków danych
+
+Liczba braków w kolumnach możemy podzielić na trzy koszyki:
+1. Duża ilość braków dla: browseragent, screenheight, screenwidth, payclickedtime - wszystkie mają po 25451 braków
+2. Mniejsza ilość braków dla: initialtranscation_id, description, mccname, status, listtype - wszystkie po 3961 braków
+3. Brak braków dla: id, createtime, amount, issuer, type, level, countrycode
+
+Usuwamy kolumny z koszytka 1 (Duża ilość braków), czyli kolejno -screenwidth, -screenheight, -browseragent, -payclickedtime poniewaz każda z nich ma 25 451 pustych rekordów.
+
+Kolumny browseragent, screenheight, screenwidth time nie wydają się ważnymi zmiennymi w naszej analizie. Rozwazalismy zostawienie kolumny payclickedtime, poniewaz moze to sugerowac, ze transakcja się nie powiodła, bo klient za długo zwlekał, jednakże 87% braków to zdecydowanie za dużo.
+
+Bedzie trzeba przyjrzec się wierszom w ktorych nulle wystepuja z koszyka 2, czyli w kolumnach listtype, mccname, decription, initialtransaction_id, status 
+
+##### Usuwanie wybranych kolumn z brakami danych
+```{r}
+#Usuwamy z próby uczącej kolumny z duża ilością braków danych(25451)
+proba_uczaca <- proba_uczaca %>%
+  select(-screenwidth, -screenheight, -browseragent, -payclickedtime)
+#Analogicznie robimy z próbą testową
+proba_testowa <- proba_testowa %>%
+  select(-screenwidth, -screenheight, -browseragent, -payclickedtime)
+
+```
+Zgodnie z wnioskami powyżej usuneliśmy kolumny z największa ilością braków danych, które również nie wydają się istotne dla analizy.
+##### Sprawdzanie NA w kolumnach w probie testowej
+```{r}
+
+na_per_column <- colSums(is.na(proba_testowa))
+cat("Liczba brakujących wartości w każdej kolumnie:\n")
+print(na_per_column)
+
+```
+Kolumny z brakami danych: amount: 13487 braków description: 1654 braków listtype: 1698 braków mccname: 1698 braków
+
+##### Usuwanie wierszy, gdzie 'initialtransaction_id' jest NA w głównym zbiorze danych
+
+```{r}
+
+proba_uczaca <- proba_uczaca %>% filter(!is.na(initialtransaction_id))
+proba_testowa <- proba_testowa %>% filter(!is.na(initialtransaction_id))
+
+```
+
+Usuneliśmy wszystkie wiersze, w których wartość initialtransaction_id jest NA w dwóch zbiorach danych: proba_uczaca i proba_testowa.
+initialtransaction_id jest identyfikatorem transakcji. Braki danych w tej kolumnie mogą sugerować brak podstawowych informacji o transakcji, co uniemożliwia dokładną analizę. Usunięcie tego wierszu pozwoli nam na zwiększenie integralności danych. Każdy wiersz zawiera teraz wymagany identyfikator transakcji, co poprawia jakość analizy, ponieważ Wiersze z brakami w tej kolumnie mogłyby powodować błędy lub nieprawidłowe wyniki w trakcie uczenia modeli.
+
+### 2.2 Tworzenie zmiennych
+
+#### 2.2.1 Zmiana nazwy kolumny initialtransaction_id
+Dla ułatwienia interpretacji zmieniamy nazwe kolumny initialtransaction_id na id_klienta
+```{r}
+
+colnames(proba_uczaca)[colnames(proba_uczaca) == "initialtransaction_id"] <- "id_klienta"
+colnames(proba_testowa)[colnames(proba_testowa) == "initialtransaction_id"] <- "id_klienta"
+
+```
+
+#### 2.2.2 Przekształcenie kolumny createtime na format daty
+Przekształcamy kolumne createtime na samą date - czyli usuwamy z niej godzinę dla próby uczacej i próby testowej.
+```{r}
+
+proba_uczaca$createtime <- as.Date(proba_uczaca$createtime)
+proba_testowa$createtime <- as.Date(proba_testowa$createtime)
+
+```
+
+Sprawdzenie poprawności przekształcenia:
+```{r}
+
+head(proba_uczaca$createtime)
+head(proba_testowa$createtime)
+
+```
+
+#### 2.2.3 Grupowanie danych
+Grupujemy dane na podstawie kolumny id_klienta dla próby uczącej i próby testowej. Następnie dla każdej grupy obliczamy najwcześniejszą datę z kolumny createtime. Następnie sprawdzamy wyniki.
+```{r}
+
+earliest_dates_proba_uczaca <- proba_uczaca %>%
+  group_by(id_klienta) %>%
+  summarise(earliest_createtime = min(createtime, na.rm = TRUE))  ##ignorujemy brakujące wartości
+
+earliest_dates_proba_testowa <- proba_testowa %>%
+  group_by(id_klienta) %>%
+  summarise(earliest_createtime = min(createtime, na.rm = TRUE)) ##ignorujemy brakujące wartości
+
+head(earliest_dates_proba_uczaca)
+head(earliest_dates_proba_testowa)
+
+```
+
+Dodajemy najwcześniejsze daty do oryginalnego zbioru danych
+
+```{r}
+
+proba_uczaca <- proba_uczaca %>%
+  left_join(earliest_dates_proba_uczaca, by = "id_klienta")
+
+proba_testowa <- proba_testowa %>%
+  left_join(earliest_dates_proba_testowa, by = "id_klienta")
+
+```
+
+#### 2.2.4 Przypisanie sukcesu i porażki
+Przypisywanie sukcesu i porażku dla odpowiedniego argumentu w status
+
+```{r}
+# Tworzenie zmiennej status_binary na podstawie kolumny status, dla wartości w kolumnie status = "completed successfully" przypisujemy sukces, a dla każdej innej wartości porażke - zgodnie z poleceniem.
+proba_uczaca$status_binary <- ifelse(proba_uczaca$status == "completed successfully", "sukces", "porażka")
+
+# Przekształcenie zmiennej 'status_binary' na zmienną typu factor
+proba_uczaca$status_binary <- factor(proba_uczaca$status_binary, levels = c("sukces", "porażka"))
+
+```
+
+#### 2.2.5 Nowa zmienna - diffrerence_in_days
+##### Dla próby uczącej
+Tworzenie nowej zmiennej - diffrerence_in_days, która pokazuje nam liczbę dni między datą transkacji a wygąsnięciem karty w próbie uczącej
+```{r}
+
+library(lubridate)
+
+# Tworzenie pełnej daty wygaśnięcia karty dla próby uczącej
+proba_uczaca$expirationdate <- ceiling_date(
+  as.Date(paste(proba_uczaca$expiryyear, proba_uczaca$expirymonth, "01", sep = "-")), 
+  "month") - days(1)
+
+# Konwersja daty i czasu transakcji na format daty
+proba_uczaca$createtime <- as.Date(proba_uczaca$createtime)
+
+# Tworzymy nową zmienną diffrerence_in_days
+proba_uczaca$difference_in_days <- as.numeric(proba_uczaca$expirationdate - proba_uczaca$createtime)
+
+# Podgląd wyników
+head(proba_uczaca[, c("createtime", "expirationdate", "difference_in_days")])
+
+```
+##### Dla próby testowej
+Tworzenie nowej zmiennej - diffrerence_in_days, która pokazuje nam liczbę dni między datą transkacji a wygąsnięciem karty w próbie testowej
+```{r}
+# Tworzenie pełnej daty wygaśnięcia karty tym razem dla próby testowej
+proba_testowa$expirationdate <- ceiling_date(
+  as.Date(paste(proba_testowa$expiryyear, proba_testowa$expirymonth, "01", sep = "-")), 
+  "month") - days(1)
+
+# Konwersja daty i czasu transakcji na format daty
+proba_testowa$createtime <- as.Date(proba_testowa$createtime)
+
+# Tworzymy nową zmienną diffrerence_in_days
+proba_testowa$difference_in_days <- as.numeric(proba_testowa$expirationdate - proba_testowa$createtime)
+
+# Podgląd wyników
+head(proba_testowa[, c("createtime", "expirationdate", "difference_in_days")])
+```
+#### 2.2.6 Sprawdzanie brakujących wartości
+##### Brakujące wartości w próbie uczącej
+Szukamy brakujących wartości w próbie uczącej
+```{r}
+
+#Ponownie sprawdzamy brakujące wartości w kolumnach w próbie uczącej
+na_per_column <- colSums(is.na(proba_uczaca))
+cat("Liczba brakujących wartości w każdej kolumnie:\n")
+print(na_per_column)
+
+```
+Mamy 3517 brakujących wartoości dla description i 0 dla amount
+
+##### Brakujące wartości w próbie testowej
+Sprawdzamy brakujące wartości w kolumnach w próbie testowej
+```{r}
+
+na_per_column <- colSums(is.na(proba_testowa))
+cat("Liczba brakujących wartości w każdej kolumnie:\n")
+print(na_per_column)
+
+```
+Mamy 13487 brakujących wartości dla kolumny amount oraz 1526 dla description
+
+
+
+
+# 3. Wzbogacanie danych
+
+### 3.1 Ilosc wierszy przed łączeniem
+Sprawdzamy ilość wierszy przed łączeniem
+```{r}
+nrow(proba_uczaca)
+```
+
+#### 3.1.1 Tworzenie dodatkowych zmiennych czasowych
+
+Tworzenie dodatkowych zmiennych czasowych
+```{r}
+# Tworzenie dodatkowych zmiennych czasowych w próbie uczącej i próbie testowej, bazując na kolumnie createtime, 
+proba_uczaca <- proba_uczaca %>%
+  mutate(weekday = weekdays(as.Date(createtime)), #Konweruje wartość na dzień tygodnia np. Monday
+         month = as.numeric(format(as.Date(createtime), "%m")), #Konwertuje wartość na miesiąc np. January
+         hour = as.numeric(format(as.POSIXct(createtime), "%H"))) #Konweruje HH:MM na samo HH
+
+#Działąnie nalogicznie co przy próbie uczącej
+proba_testowa <- proba_testowa %>%
+  mutate(weekday = weekdays(as.Date(createtime)),
+         month = as.numeric(format(as.Date(createtime), "%m")),
+         hour = as.numeric(format(as.POSIXct(createtime), "%H")))
+```
+
+Wartości NULL są dla nas jak braki, więc postępujemy z nimi identycznie jak z N/A, następnie sprawdzamy wynik
+```{r}
+
+#Zliczamy dodatkowo wartości NULL w kolumnie, ponieważ traktujemy je również jako braki
+null_per_column <- sapply(proba_uczaca, function(x) sum(sapply(x, is.null)))
+
+cat("Liczba NULL w każdej kolumnie:\n")
+print(null_per_column)
+
+```
+Nie ma więcej braków "NULL"
+
+#### 3.1.2 Weryfikacja czy nie straciliśmy żadnych obserwacji po łączeniu
+Weryfikacja czy nie straciliśmy żadnych obserwacji po łączeniu
+```{r}
+
+nrow(proba_uczaca)
+
+```
+Liczba obserwacji jest taka sama jak przed łączniem więc nie straciliśmy obserwacji po połączenie danych.
+
+### 3.2 Dodanie agregacji
+Tworzymy tabele z agregacjami, następnie przeprowadzamy grupowanie po kolumnie id_klienta, a następnie obliczamy różne agregaty opisane poniżej w kodzie
+```{r}
+
+aggregated_data <- proba_uczaca %>%
+  group_by(id_klienta) %>%
+  summarise(
+    max_amount = max(amount, na.rm = TRUE),   # Maksymalna wartość transakcji dla danego klienta
+    min_amount = min(amount, na.rm = TRUE),   # Minimalna wartość transakcji dla danego klienta
+    avg_amount = mean(amount, na.rm = TRUE),  # Średnia wartość transakcji dla danego klienta
+    sum_amount = sum(amount, na.rm = TRUE),   # Suma transakcji dla danego klienta
+    max_date = max(createtime, na.rm = TRUE), # Maksymalna data transakcji dla danego klienta
+    min_date = min(createtime, na.rm = TRUE), # Minimalna data transakcji dla danego klienta
+    transaction_count = n()                   # Liczba transakcji dla danego klienta
+  )
+
+```
+
+#### 3.2.1 Dołączenie agregacji do oryginalnego zbioru danych
+Dołączamy agregowane powyżej dane do próby uczącej. 
+```{r}
+
+proba_uczaca <- proba_uczaca %>%
+  left_join(aggregated_data, by = "id_klienta") #Do próby uczącej do każdego wiersza dodajemy kolumny z agregacjami obliczonymi powyżej w agregacji.
+
+```
+
+
+#### 3.2.2 Tworzenie tabeli z agregacjami tak samo, jak robiliśmy to dla próby uczącej.
+```{r}
+options(warn= -1)
+aggregated_data_testowa <- proba_testowa %>%
+  group_by(id_klienta) %>%
+  summarise(
+   max_amount = max(amount, na.rm = TRUE),
+    min_amount = min(amount, na.rm = TRUE),
+    avg_amount = mean(amount, na.rm = TRUE),
+    sum_amount = sum(amount, na.rm = TRUE),
+    max_date = max(createtime, na.rm = TRUE),
+    min_date = min(createtime, na.rm = TRUE),
+    transaction_count = n()
+  )
+
+```
+
+#### 3.2.3 Dołączenie agregacji do oryginalnego zbioru danych analogicznie jak w próbie uczącej powyżej
+```{r}
+
+proba_testowa <- proba_testowa %>%
+  left_join(aggregated_data_testowa, by = "id_klienta")
+
+```
+
+#### 3.2.4 Sprawdzenie jakie kolumny powstały po transformacjach
+```{r}
+
+colnames(proba_uczaca)
+
+```
+Mamy tu wszystkie kolumny, zaprezentowane są zmiany jakich dokonaliśmy.
+Nowe zmienne - weekday, month, hour, difference_in_days.
+Zmienione nazwy kolumn - initialtransaction_id na id_klienta.
+Agregacje danych - max_amount, avg_amount, transaction count.
+
+
+# 4. Budowanie modeli
+
+### 4.1 Tworzenie zbiorów
+Tworzymy zbiory do budowy modelu. Poszczególne kroki są opisane w kodzie.
+```{r}
+
+library(randomForest)
+library(caret)
+
+# Usuwanie wartości NA w zmiennej status przed podziałem
+proba_uczaca <- proba_uczaca[!is.na(proba_uczaca$status), ]
+
+# Podział na klasy sukces i porażka na podstawie zmiennej status_binary
+sukces <- proba_uczaca[proba_uczaca$status_binary == "sukces", ]
+porażka <- proba_uczaca[proba_uczaca$status_binary == "porażka", ]
+
+# Sprawdzenie liczby obserwacji w każdej klasie, sprawdzamy jak zrównoważone są dane w obu klasach
+cat("Liczba sukcesów:", nrow(sukces), "\n")
+cat("Liczba porażek:", nrow(porażka), "\n")
+
+# Ustawienie minimalnej liczby obserwacji między klasami, określamy minimalną liczbę obserwacji między klasami, aby obie grupy były reprezentowane w równym stopniu w zbiorze uczącym, i żeby nie wystąpiło "przeładowanie" jednej z klas w przypadku silnej nierównowagi
+min_obs <- min(nrow(sukces), nrow(porażka))
+
+# Losowy wybór obserwacji do zbioru uczącego i walidacyjnego, wybieramy 70% danych
+set.seed(123)
+train_sukces <- sukces[sample(seq_len(nrow(sukces)), size = floor(0.7 * min_obs)), ]
+train_porazka <- porażka[sample(seq_len(nrow(porażka)), size = floor(0.7 * min_obs)), ]
+
+val_sukces <- sukces[!(rownames(sukces) %in% rownames(train_sukces)), ]
+val_porazka <- porażka[!(rownames(porażka) %in% rownames(train_porazka)), ]
+
+# Łączenie zbiorów uczących dla klasy "sukces" i "porażka" w jeden zbiór uczący (train_set), a następnie łączenie zbiorów walidacyjnych w jeden zbiór walidacyjny (val_set)
+train_set <- rbind(train_sukces, train_porazka)
+val_set <- rbind(val_sukces, val_porazka)
+
+# Sprawdzenie liczby obserwacji w zbiorach uczącym i walidacyjnym
+cat("Liczba obserwacji w zbiorze uczącym:", nrow(train_set), "\n")
+cat("Liczba obserwacji w zbiorze walidacyjnym:", nrow(val_set), "\n")
+
+```
+W zbiorze walidacyjnym pozostaje większa liczba obserwacji, co może wskazywać na to, że zbiór walidacyjny jest bardziej zrównoważony pod względem liczby obserwacji z obu klas.
+
+### 4.2 Poprawki przed budową modelu
+
+#### 4.2.1 Sprawdzenie brakujących danych w zbiorze uczącym
+```{r}
+sapply(train_set, function(x) sum(is.na(x)))
+# Mamy 1075 braków danych dla zmiennej description
+```
+
+
+```{r}
+str(proba_uczaca)
+#Kolumna status przetrenowuje model i trzeba ją usunąć
+```
+
+#### 4.2.2 Usuwanie wierszy bez wartości w dla zmiennej status_binary
+```{r}
+# Usuwanie tylko tych wierszy, które mają brakujące wartości w kolumnie 'status_binary'
+proba_uczaca <- proba_uczaca[!is.na(proba_uczaca$status_binary), ]
+
+
+# Sprawdzamy strukturę danych po usunięciu kolumn
+str(proba_uczaca)
+
+
+sum(is.na(proba_uczaca$status_binary)) #Ile NA po usunięciu wierszy w status_binary
+
+# Sprawdzanie liczby brakujących wartości w każdej kolumnie
+missing_values <- sapply(proba_uczaca, function(x) sum(is.na(x)))
+missing_values
+
+```
+Porawnie usuneliśmy brakujące wiersze dla NA w status_binary
+Description ma 3517 brakujących wartości - nie jest to dla nas istotna zmienna, więc ją usuniemy, reszta zmiennych jest kompletna
+
+#### 4.2.3 Usuwamy kolumne description poniewaz ma braki w danych
+```{r}
+
+train_set <- train_set %>%
+  select(-description)
+
+```
+
+### 4.3 Tworzenie modelu klasyfikacyjnego
+W tej części tworzymy dwa modele. Pierwszy model przewiduję status_binary, a drugi zmienną amount
+
+W przypadku modelu klasyfikacyjnego dla zmiennej status_binary, kolumny, które nie będą użyteczne w modelu (takie jak amount, status, max_amount, min_amount, avg_amount, sum_amount) są usuwane z zestawu danych, ponieważ uważamy że za bardzo wzbogaciliśmy model i powodowało to problemy w analizie.
+
+```{r}
+
+train_set_clean <- train_set %>% select(-amount, -status, -max_amount, -min_amount, -avg_amount, -sum_amount)
+
+# Zbudowanie modelu dla zmiennej status_binary
+model_status <- randomForest(
+  status_binary ~ .,  # Zmienna zależna: status_binary
+  data = train_set_clean, # Zbiór danych
+  ntree = 300,        # Określamy liczbe drzew jako 300
+  importance = TRUE    # Obliczanie ważności zmiennych, będziemy mogli zobaczyć, które cechy mają największy wpływ na model
+)
+
+#Analogicznie jak wyżej
+train_set_clean_amount <- train_set %>% select(-status, -status_binary, -max_amount, -min_amount, -avg_amount, -sum_amount)
+
+# Zbudowanie modelu dla zmiennej amount (regresja)
+model_amount <- randomForest(
+  amount ~ .,         # Zmienna zależna: amount
+  data = train_set_clean_amount, # Zbiór danych
+  ntree = 300,        # Określamy liczbe drzew jako 300
+  importance = TRUE    # Obliczanie ważności zmiennych, będziemy mogli zobaczyć, które cechy mają największy wpływ na model
+)
+
+# Wyświetlenie wyników modelu dla status_binary
+print(model_status)
+varImpPlot(model_status)
+
+# Wyświetlenie wyników modelu dla amount
+print(model_amount)
+varImpPlot(model_amount)
+
+```
+### 4.4 Wnioski
+1. Model klasyfikacyjny dla status_binary:
+Model jest w stanie poprawnie sklasyfikować dane w około 86,65% przypadków (OOB - 13,35%; 100%-13,35%=86,65%)
+
+Dla klasy "sukces": 
+3057 trafnych klasyfikacji (sukces > sukces) 
+487 błędnych klasyfikacji (sukces > porażka)
+Class.error: 0.1374 (13.74% błędów w tej klasie) 
+
+Dla klasy "porażka": 459 błędnych klasyfikacji (porażka > sukces) 
+3085 trafnych klasyfikacji (porażka > porażka) 
+Class.error: 0.1295 (12.95% błędów w tej klasie)
+
+Wskazuje to, że model dobrze radzi sobie z klasyfikowaniem "porażki", ale nieco gorzej z klasyfikowaniem "sukcesów".
+
+2. Model regresyjny dla amount:
+SSE (średnia kwadratów reszt) wtnosi 3798,799
+% Var explained (procent wyjaśnionej zmienności): 80,86%. Model wyjaśnia około 81% zmienności w zmiennej amount, co wskazuje na dobrą jakość modelu regresyjnego.
+
+
+### 4.5 Balansowanie modelu
+### 4.5.1 Obliczanie klas
+```{r}
+
+# Obliczanie wag dla klas (np. odwrotność liczby obserwacji w każdej klasie)
+class_weights <- table(train_set_clean$status_binary) #tabela liczebności zmiennej status_binary
+class_weights <- 1 / class_weights #obliczamy odwrotność liczby obserwacji w każdej klasie - im mniej przykładów danej klasy, tym większa waga.
+class_weights <- class_weights / sum(class_weights)  #Normalizujemy wagi, aby ich suma wynosiła 1. Dzięki temu nie zmienia to ogólnej skali wag, ale sprawia, że są one proporcjonalne do liczności klas.
+
+# Wagi dla klasyfikacji
+train_set_clean$status_binary_weight <- ifelse(train_set_clean$status_binary == "sukces", class_weights["sukces"], class_weights["porażka"])  #przypisujemy odpowiednią wagę do nowej zmiennej status_binary_weight w zależności od klasy (sukces lub porażka). Dzięki temu model będzie brał pod uwagę nierówną liczbę obserwacji podczas nauki.
+
+```
+
+# 5. Budowanie modelu po balansowaniu wagami
+
+### 5.1 Zbudowanie modelu dla zmiennej status_binary z uwzględnieniem wag, aby zmniejszyć nierówności oraz wyświetlenie wyników
+```{r}
+
+model_status_weighted <- randomForest(
+  status_binary ~ .,  # Zmienna zależna: status_binary
+  data = train_set_clean, # Zbiór danych
+  ntree = 300,        #300 drzew
+  importance = TRUE,   # Obliczanie ważności zmiennych
+  weights = train_set_clean$status_binary_weight  # Wagi dla zmiennej, którą wcześniej utworzyliśmy
+)
+
+# Wyświetlenie wyników modelu dla status_binary z wagami
+print(model_status_weighted)
+varImpPlot(model_status_weighted)
+
+```
+### 5.2 Wnioski
+OOB wynosi 13,22%, co oznacza, że model osiągnął nieco lepszy wynik niż wcześniej (13.35%) po uwzględnieniu wag dla klas. Jest to spadek błędu, co sugeruje, że dodanie wag poprawiło zdolność modelu do rozróżniania między klasami.
+
+Sukces: 
+3063 przypadków poprawnie sklasyfikowanych jako "sukces".
+481 przypadków błędnie sklasyfikowanych jako "porażka". 
+Błąd klasyfikacji dla sukcesu wynosi 0.14. 
+Porażka: 456 przypadków błędnie sklasyfikowanych jako "sukces". 
+3088 przypadków poprawnie sklasyfikowanych jako "porażka". 
+Błąd klasyfikacji dla porażki wynosi 0.13.
+
+
+### 5.3 Ocena modelu
+
+#### 5.3.1 Przewidywanie na zbiorze testowym
+```{r}
+
+pred <- predict(model_status, val_set)
+conf_matrix <- confusionMatrix(pred, val_set$status_binary) #Tworzymy macierz pomyłek
+print(conf_matrix)
+
+```
+14748 poprawnie sklasyfikowane jako "sukces". 
+199 przypadków "sukces", które zostały błędnie sklasyfikowane jako "porażka". 
+2095 przypadków "porażka", które zostały błędnie sklasyfikowane jako "sukces". 
+1321 poprawnie sklasyfikowane jako "porażka".
+Accuracy : 0.8751 - model poprawnie sklasyfikował 87,51% przypadków
+95% CI (przedział ufności dla dokładności): (0,8702, 0,8798) – przedział ufności dla dokładności modelu wskazuje na stosunkowo małą niepewność w wyniku.
+P-Value [Acc > NIR]: 1 – oznacza, że dokładność modelu jest równa lub lepsza, niż wynikałoby to z samego przewidywania najczęstszej klasy.
+
+Dla obu klas:
+Sensitivity (Czułość): 87,56% – model wykrywa 87,56% przypadków klasy "sukces".
+Specificity (Specyficzność): 86,91% – model wykrywa 86,91% przypadków klasy "porażka". 
+Pos Pred Value: 98,67% – kiedy model przewiduje "sukces", w 98,67% przypadków jest to trafna klasyfikacja. 
+Neg Pred Value: 38,67% – kiedy model przewiduje "porażka", jest to trafne w 38,67% przypadków.
+
+Model wykazuje dobrą dokładność (87,51%) i umiejętność wykrywania "sukcesu" oraz "porażki" w wysokim stopniu. Chociaż jest ogólnie skuteczny, nadal są błędne klasyfikacje, zwłaszcza w wykrywaniu "porażki", co widzimy w mniejszej czułości (86,91%) i niższym poziomie trafności predykcji "porażka" (38,67%).
+
+#### 5.3.2 Predykcja na zbiorze testowym oraz wyniki
+```{r}
+
+predykcje_amount <- predict(model_amount, newdata = val_set)
+
+# Rzeczywiste wartości ze zbioru walidacyjnego, które użyjemy do obliczania błędów
+rzeczywiste_amount <- val_set$amount
+
+# Obliczenie błędów (np. MSE, RMSE)
+mse <- mean((predykcje_amount - rzeczywiste_amount)^2)
+rmse <- sqrt(mse)
+
+# Wyświetlenie wyników
+cat("Mean Squared Error (MSE):", mse, "\n")
+cat("Root Mean Squared Error (RMSE):", rmse, "\n")
+
+```
+Wnioski 
+MSE - Wartość 6646,16 wskazuje na umiarkowany błąd w przewidywaniach.
+RMSE - Wartość 81,52 oznacza, że średni błąd przewidywania wynosi około 81.52 jednostek
+
+
+#### 5.3.3 Predykcja na danych testowych
+```{r}
+# Predykcja dla modelu status_binary dla próby testowej
+pred_status_test <- predict(model_status, proba_testowa)
+pred_status_test <- as.factor(pred_status_test)
+
+# Predykcja dla modelu amount
+pred_amount_test <- predict(model_amount, proba_testowa)
+
+# Zapis predykcji do obiektu predykcja_testowa
+predykcje_testowa <- data.frame(status = pred_status_test, amount = pred_amount_test)
+
+# Zapisz wyniki
+save(predykcje_testowa, file = "predykcje_testowa.RData")
+```
+
+
+# 6. Wykresy
+
+### 6.1 Wykresy rozrzutu
+```{r}
+# Wykres
+ggplot(predykcje_testowa, aes(x = status, y = amount, color = status)) +
+  geom_jitter(width = 0.1, height = 0) +  # Użycie geom_jitter, aby rozproszyć punkty
+  labs(title = "Wykres amount w zależności od statusu",
+       x = "Status",
+       y = "Amount") +
+  theme_minimal() +
+  scale_color_manual(values = c("sukces" = "blue", "porażka" = "red"))  # Kolory dla kategorii
+```
+
+### 6.2 Histogramy
+```{r}
+# Wykres dla "porażka"
+ggplot(predykcje_testowa[predykcje_testowa$status == "porażka",], aes(x = amount)) +
+  geom_histogram(binwidth = 100, fill = "red", color = "black", alpha = 0.7) + 
+  labs(title = "Rozkład Amount dla Porażki", x = "Amount", y = "Liczba obserwacji") +
+  theme_minimal()
+
+# Wykres dla "sukces"
+ggplot(predykcje_testowa[predykcje_testowa$status == "sukces",], aes(x = amount)) +
+  geom_histogram(binwidth = 100, fill = "blue", color = "black", alpha = 0.7) + 
+  labs(title = "Rozkład Amount dla Sukcesu", x = "Amount", y = "Liczba obserwacji") +
+  theme_minimal()
+
+```
+
+
